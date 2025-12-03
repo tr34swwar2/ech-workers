@@ -300,10 +300,9 @@ func dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 				ipHost := serverIP
 				userHost, userPort, splitErr := net.SplitHostPort(serverIP)
 				if splitErr == nil {
-					// 如果 serverIP 带端口，剥离并使用它（覆盖原 port）
 					ipHost = userHost
 					port = userPort // 覆盖原 port（如果不想覆盖，注释此行）
-				} // else: 无端口或无效格式，使用原 serverIP + 原 port
+				}
 				return net.DialTimeout(network, net.JoinHostPort(ipHost, port), 10*time.Second)
 			}
 		}
