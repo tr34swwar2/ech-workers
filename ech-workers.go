@@ -955,11 +955,13 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	// 如果没有预设的 firstFrame，尝试读取第一帧数据（仅 SOCKS5）
 	if firstFrame == "" && mode == modeSOCKS5 {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		buffer := make([]byte, 32768)
+		buffer := make([]byte, 32*1024) // 限制最大读取 32KB
 		n, _ := conn.Read(buffer)
 		_ = conn.SetReadDeadline(time.Time{})
-		if n > 0 {
+		if n > 0 && n <= 32*1024 {
 			firstFrame = string(buffer[:n])
+		} else if n > 32*1024 {
+			firstFrame = string(buffer[:32*1024])
 		}
 	}
 
