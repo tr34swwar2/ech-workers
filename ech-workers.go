@@ -650,18 +650,22 @@ func handleUDPAssociate(tcpConn net.Conn, clientAddr string) {
 
 	// 启动 UDP 处理
 	stopChan := make(chan struct{})
-	go handleUDPRelay(udpConn, clientAddr, stopChan)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go handleUDPRelay(udpConn, clientAddr, stopChan, &wg)
 
 	// 保持 TCP 连接，直到客户端关闭
 	buf := make([]byte, 1)
 	tcpConn.Read(buf)
 
 	close(stopChan)
+	wg.Wait() // 等待 goroutine 回收
 	udpConn.Close()
 	log.Printf("[UDP] %s UDP ASSOCIATE 连接关闭", clientAddr)
 }
 
-func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struct{}) {
+func handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struct{}, wg *sync.WaitGroup) {
+	defer wg.Done()
 	buf := make([]byte, 65535)
 	for {
 		select {
