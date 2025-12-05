@@ -246,19 +246,29 @@ func parseHTTPSRecord(data []byte) string {
 		return ""
 	}
 	offset := 2
-	if offset < len(data) && data[offset] == 0 {
+	if offset >= len(data) {
+		return ""
+	}
+	if data[offset] == 0 {
 		offset++
 	} else {
 		for offset < len(data) && data[offset] != 0 {
-			offset += int(data[offset]) + 1
+			step := int(data[offset]) + 1
+			if step <= 0 || offset+step > len(data) {
+				return ""
+			}
+			offset += step
 		}
 		offset++
 	}
 	for offset+4 <= len(data) {
+		if offset+4 > len(data) {
+			return ""
+		}
 		key := binary.BigEndian.Uint16(data[offset : offset+2])
 		length := binary.BigEndian.Uint16(data[offset+2 : offset+4])
 		offset += 4
-		if offset+int(length) > len(data) {
+		if length == 0 || offset+int(length) > len(data) {
 			break
 		}
 		value := data[offset : offset+int(length)]
@@ -341,18 +351,24 @@ func queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 // ======================== WebSocket 客户端 ========================
 
 func parseServerAddr(addr string) (host, port, path string, err error) {
+	if addr == "" {
+		return "", "", "", errors.New("服务器地址为空")
+	}
 	path = "/"
 	slashIdx := strings.Index(addr, "/")
 	if slashIdx != -1 {
-		path = addr[slashIdx:]
+		if slashIdx < len(addr) {
+			path = addr[slashIdx:]
+		}
 		addr = addr[:slashIdx]
 	}
-
+	if addr == "" {
+		return "", "", "", errors.New("服务器地址格式错误")
+	}
 	host, port, err = net.SplitHostPort(addr)
-	if err != nil {
+	if err != nil || host == "" || port == "" {
 		return "", "", "", fmt.Errorf("无效的服务器地址格式: %v", err)
 	}
-
 	return host, port, path, nil
 }
 
