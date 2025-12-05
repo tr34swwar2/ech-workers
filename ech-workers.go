@@ -454,7 +454,14 @@ func runProxyServer(addr string) {
 }
 
 func handleConnection(conn net.Conn) {
-	defer conn.Close()
+	if conn == nil {
+		return
+	}
+	defer func() {
+		if conn != nil {
+			conn.Close()
+		}
+	}()
 
 	clientAddr := conn.RemoteAddr().String()
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
@@ -484,6 +491,10 @@ func handleConnection(conn net.Conn) {
 // ======================== SOCKS5 处理 ========================
 
 func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
+	if conn == nil {
+		return
+	}
+
 	// 验证版本
 	if firstByte != 0x05 {
 		log.Printf("[SOCKS5] %s 版本错误: 0x%02x", clientAddr, firstByte)
@@ -586,6 +597,10 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 }
 
 func handleUDPAssociate(tcpConn net.Conn, clientAddr string) {
+	if tcpConn == nil {
+		return
+	}
+
 	// 创建 UDP 监听器
 	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
 	if err != nil {
@@ -744,6 +759,10 @@ func handleDNSQuery(udpConn *net.UDPConn, clientAddr *net.UDPAddr, dnsQuery []by
 // ======================== HTTP 处理 ========================
 
 func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
+	if conn == nil {
+		return
+	}
+
 	// 将第一个字节放回缓冲区
 	reader := bufio.NewReader(io.MultiReader(
 		strings.NewReader(string(firstByte)),
@@ -881,12 +900,19 @@ const (
 )
 
 func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame string) error {
+	if conn == nil {
+		return errors.New("连接对象为空")
+	}
 	wsConn, err := dialWebSocketWithECH(2)
 	if err != nil {
 		sendErrorResponse(conn, mode)
 		return err
 	}
-	defer wsConn.Close()
+	defer func() {
+		if wsConn != nil {
+			wsConn.Close()
+		}
+	}()
 
 	var mu sync.Mutex
 
