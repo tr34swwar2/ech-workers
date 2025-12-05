@@ -597,7 +597,7 @@ func handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 
 		log.Printf("[SOCKS5] %s -> %s", clientAddr, target)
 
-		if err := handleTunnel(conn, target, clientAddr, modeSOCKS5, ""); err != nil {
+		if err := handleTunnel(conn, target, clientAddr, modeSOCKS5, nil); err != nil {
 			if !isNormalCloseError(err) {
 				log.Printf("[SOCKS5] %s 代理失败: %v", clientAddr, err)
 			}
@@ -824,7 +824,7 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 	case "CONNECT":
 		// HTTPS 隧道代理 - 需要发送 200 响应
 		log.Printf("[HTTP-CONNECT] %s -> %s", clientAddr, requestURL)
-		if err := handleTunnel(conn, requestURL, clientAddr, modeHTTPConnect, ""); err != nil {
+		if err := handleTunnel(conn, requestURL, clientAddr, modeHTTPConnect, nil); err != nil {
 			if !isNormalCloseError(err) {
 				log.Printf("[HTTP-CONNECT] %s 代理失败: %v", clientAddr, err)
 			}
@@ -894,7 +894,7 @@ func handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 		firstFrame := requestBuilder.String()
 
 		// 使用 modeHTTPProxy 模式（不发送 200 响应）
-		if err := handleTunnel(conn, target, clientAddr, modeHTTPProxy, firstFrame); err != nil {
+		if err := handleTunnel(conn, target, clientAddr, modeHTTPProxy, []byte(firstFrame)); err != nil {
 			if !isNormalCloseError(err) {
 				log.Printf("[HTTP-%s] %s 代理失败: %v", method, clientAddr, err)
 			}
@@ -915,7 +915,7 @@ const (
 	modeHTTPProxy   = 3 // HTTP 普通代理（GET/POST等）
 )
 
-func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame string) error {
+func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame []byte) error {
 	if conn == nil {
 		return errors.New("连接对象为空")
 	}
@@ -953,26 +953,32 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	conn.SetDeadline(time.Time{})
 
 	// 如果没有预设的 firstFrame，尝试读取第一帧数据（仅 SOCKS5）
-	if firstFrame == "" && mode == modeSOCKS5 {
+	if firstFrame == nil && mode == modeSOCKS5 {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		buffer := make([]byte, 32*1024) // 限制最大读取 32KB
 		n, _ := conn.Read(buffer)
 		_ = conn.SetReadDeadline(time.Time{})
 		if n > 0 && n <= 32*1024 {
-			firstFrame = string(buffer[:n])
+			firstFrame = buffer[:n]
 		} else if n > 32*1024 {
-			firstFrame = string(buffer[:32*1024])
+			firstFrame = buffer[:32*1024]
+		} else {
+			firstFrame = nil
 		}
 	}
 
 	// 构建连接消息，包含代理 IP 信息
-	connectMsg := fmt.Sprintf("CONNECT:%s|%s", target, firstFrame)
+	var connectMsg []byte
 	if proxyIP != "" {
-		connectMsg = fmt.Sprintf("CONNECT:%s|%s|%s", target, firstFrame, proxyIP)
+		// CONNECT:目标|首帧|代理IP
+		connectMsg = append([]byte(fmt.Sprintf("CONNECT:%s|", target)), firstFrame...)
+		connectMsg = append(connectMsg, []byte(fmt.Sprintf("|%s", proxyIP))...)
+	} else {
+		connectMsg = append([]byte(fmt.Sprintf("CONNECT:%s|", target)), firstFrame...)
 	}
 
 	mu.Lock()
-	err = wsConn.WriteMessage(websocket.TextMessage, []byte(connectMsg))
+	err = wsConn.WriteMessage(websocket.TextMessage, connectMsg)
 	mu.Unlock()
 	if err != nil {
 		sendErrorResponse(conn, mode)
