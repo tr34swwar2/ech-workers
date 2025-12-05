@@ -1010,7 +1010,11 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 	log.Printf("[代理] %s 已连接: %s", clientAddr, target)
 
 	// 双向转发
-	done := make(chan bool, 2)
+	done := make(chan struct{})
+	var once sync.Once
+	closeDone := func() {
+		once.Do(func() { close(done) })
+	}
 
 	// Client -> Server
 	go func() {
@@ -1021,7 +1025,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 				mu.Lock()
 				wsConn.WriteMessage(websocket.TextMessage, []byte("CLOSE"))
 				mu.Unlock()
-				done <- true
+				closeDone()
 				return
 			}
 
@@ -1029,7 +1033,7 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 			err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
 			mu.Unlock()
 			if err != nil {
-				done <- true
+				closeDone()
 				return
 			}
 		}
@@ -1040,19 +1044,19 @@ func handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame
 		for {
 			mt, msg, err := wsConn.ReadMessage()
 			if err != nil {
-				done <- true
+				closeDone()
 				return
 			}
 
 			if mt == websocket.TextMessage {
 				if string(msg) == "CLOSE" {
-					done <- true
+					closeDone()
 					return
 				}
 			}
 
 			if _, err := conn.Write(msg); err != nil {
-				done <- true
+				closeDone()
 				return
 			}
 		}
