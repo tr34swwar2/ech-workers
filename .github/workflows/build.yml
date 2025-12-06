@@ -2,15 +2,20 @@ name: Build Go Binary
 
 on:
   push:
-    tags: ['v*'] 
+    tags: ['v*']
   workflow_dispatch:
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
+  # 删除了 build-windows 任务
+
+  # 删除了 build-linux 任务 (ech-linux-amd64)
+
+  # 保留：Linux ARM64 交叉编译任务
+  build-linux-arm64:
+    runs-on: ubuntu-latest # 使用 ubuntu-latest 进行交叉编译
     # 条件执行：仅在标签发布或手工触发时运行
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -21,73 +26,27 @@ jobs:
         go-version: '1.21'
         cache: false
 
-    - name: Build Windows
-      run: go build -ldflags="-s -w" -o ech-win.exe ech-workers.go
-
-    - name: Upload Windows binary
-      uses: actions/upload-artifact@v4
-      with:
-        name: ech-windows
-        path: ech-win.exe
-
-  build-linux:
-    runs-on: ubuntu-latest
-    # 条件执行：仅在标签发布或手工触发时运行
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-        cache: false
-
-    - name: Build Linux
+    - name: Build Linux ARM64
+      # 设置 GOOS=linux 和 GOARCH=arm64 进行交叉编译
       run: |
-        go build -ldflags="-s -w" -o ech-linux ech-workers.go
-        chmod +x ech-linux
+        GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ech-linux-arm64 ech-workers.go
+        chmod +x ech-linux-arm64
 
-    - name: Upload Linux binary
+    - name: Upload Linux ARM64 binary
       uses: actions/upload-artifact@v4
       with:
-        name: ech-linux
-        path: ech-linux
+        name: ech-linux-arm64
+        path: ech-linux-arm64
 
-  build-macos:
-    runs-on: macos-latest
-    # 条件执行：仅在标签发布或手工触发时运行
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-        cache: false
-
-    - name: Build macOS
-      run: |
-        go build -ldflags="-s -w" -o ech-macos ech-workers.go
-        chmod +x ech-macos
-
-    - name: Upload macOS binary
-      uses: actions/upload-artifact@v4
-      with:
-        name: ech-macos
-        path: ech-macos
+  # 删除了 build-macos 任务
 
   release:
-    needs: [build-windows, build-linux, build-macos]
+    # 依赖只保留 build-linux-arm64 任务
+    needs: [build-linux-arm64]
     runs-on: ubuntu-latest
     # 只在创建 v 开头的标签时创建发布
     if: startsWith(github.ref, 'refs/tags/v')
-    
+
     steps:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
@@ -99,9 +58,8 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          ech-windows/ech-win.exe
-          ech-linux/ech-linux
-          ech-macos/ech-macos
+          # 只保留 ech-linux-arm64 的文件路径
+          ech-linux-arm64/ech-linux-arm64
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
