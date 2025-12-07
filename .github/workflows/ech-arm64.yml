@@ -1,0 +1,68 @@
+name: echs-workers-arm64 配置文件支持
+
+on:
+  # 允许手动触发工作流
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release 标签 (例如: v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      target_os:
+        description: '目标操作系统 (GOOS)'
+        required: true
+        default: 'linux'
+      target_arch:
+        description: '目标架构 (GOARCH)'
+        required: true
+        default: 'arm64'
+      output_name:
+        description: '输出文件名 (例如: ech-linux-arm64)'
+        required: true
+        default: 'ech-linux-arm64'
+
+jobs:
+  build_and_release:
+    # 授予工作流程权限以创建/修改 Releases
+    permissions:
+      contents: write
+      
+    runs-on: ubuntu-latest
+    steps:
+      - name: ⬇️ 检出代码
+        uses: actions/checkout@v4
+
+      - name: 🛠️ 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21' 
+
+      - name: ⚙️ 交叉编译 ${{ github.event.inputs.output_name }}
+        # 将编译步骤放在一个单独的 run 块中
+        run: |
+          echo "GOOS: ${{ github.event.inputs.target_os }}"
+          echo "GOARCH: ${{ github.event.inputs.target_arch }}"
+          
+          # 设置交叉编译环境变量
+          export GOOS=${{ github.event.inputs.target_os }}
+          export GOARCH=${{ github.event.inputs.target_arch }}
+          export CGO_ENABLED=0
+
+          # 编译 Go 程序，使用 -ldflags 减小体积
+          go build -ldflags "-s -w" -o ${{ github.event.inputs.output_name }} ./echs-workers.go
+        
+      - name: 🚀 创建并上传 Release Asset
+        # softprops/action-gh-release 可以一步完成创建 Release 和上传文件
+        uses: softprops/action-gh-release@v1
+        with:
+          # 使用用户输入的 tag 作为 Release 标签
+          tag_name: ${{ github.event.inputs.release_tag }}
+          # 自动生成 Release 名称
+          name: Release ${{ github.event.inputs.release_tag }} (${{ github.event.inputs.target_os }}-${{ github.event.inputs.target_arch }})
+          # 创建一个草稿 Release，您可以手动检查后再发布
+          draft: true
+          # 指定要上传的文件路径
+          files: |
+            ${{ github.event.inputs.output_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
