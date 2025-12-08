@@ -32,7 +32,7 @@ type InstanceConfig struct {
 	ListenAddr string `json:"listen_addr"`
 	ServerAddr string `json:"server_addr"`
 	ServerIP   string `json:"server_ip"`
-	Token      string `json:"token"`
+	Token      string `json:"token"`      // 允许为空
 	DnsServer  string `json:"dns_server"`
 	EchDomain  string `json:"ech_domain"`
 	ProxyIP    string `json:"proxy_ip"`
@@ -66,8 +66,9 @@ func loadConfig(path string) error {
 	
 	// 校验配置并设置默认值
 	for i, cfg := range configs {
-		if cfg.ListenAddr == "" || cfg.ServerAddr == "" || cfg.Token == "" {
-			return fmt.Errorf("实例 %d 配置不完整: 缺少 listen_addr, server_addr 或 token", i+1)
+		// FIX: 不再强制要求 Token 字段
+		if cfg.ListenAddr == "" || cfg.ServerAddr == "" {
+			return fmt.Errorf("实例 %d 配置不完整: 缺少 listen_addr 或 server_addr", i+1)
 		}
 		if cfg.DnsServer == "" {
 			cfg.DnsServer = "dns.alidns.com/dns-query"
@@ -75,6 +76,7 @@ func loadConfig(path string) error {
 		if cfg.EchDomain == "" {
 			cfg.EchDomain = "cloudflare-ech.com"
 		}
+		// 如果 Token 为空，它将保持空字符串 ""
 	}
 	return nil
 }
@@ -87,7 +89,6 @@ func main() {
 		log.Fatal("❌ 必须使用 -c 参数指定配置文件路径 (例如: -c config.json)")
 	}
 
-	// --- 配置文件模式 ---
 	log.Printf("🚀 正在加载配置文件: %s", configFile)
 	if err := loadConfig(configFile); err != nil {
 		log.Fatalf("❌ 加载配置文件失败: %v", err)
@@ -105,7 +106,6 @@ func main() {
 			defer wg.Done()
 			log.Printf("🔌 [实例 %d / %s] 正在获取 ECH 配置...", index+1, instance.ListenAddr)
 			if err := instance.prepareECH(); err != nil {
-				// ECH 配置失败，直接退出该实例的启动
 				log.Fatalf("❌ [实例 %d / %s] 获取 ECH 配置失败: %v", index+1, instance.ListenAddr, err)
 			}
 			instance.runProxyServer()
@@ -135,7 +135,6 @@ func isNormalCloseError(err error) bool {
 
 const typeHTTPS = 65
 
-// prepareECH 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) prepareECH() error {
 	echBase64, err := cfg.queryHTTPSRecord()
 	if err != nil {
@@ -155,13 +154,11 @@ func (cfg *InstanceConfig) prepareECH() error {
 	return nil
 }
 
-// refreshECH 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) refreshECH() error {
 	log.Printf("🔄 [%s ECH] 刷新配置...", cfg.ListenAddr)
 	return cfg.prepareECH()
 }
 
-// getECHList 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) getECHList() ([]byte, error) {
 	cfg.EchListMu.RLock()
 	defer cfg.EchListMu.RUnlock()
@@ -187,17 +184,17 @@ func buildTLSConfigWithECH(serverName string, echList []byte) (*tls.Config, erro
 	}, nil
 }
 
-// queryHTTPSRecord 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) queryHTTPSRecord() (string, error) {
 	dohURL := cfg.DnsServer
 	if !strings.HasPrefix(dohURL, "https://") && !strings.HasPrefix(dohURL, "http://") {
 		dohURL = "https://" + dohURL
 	}
-	return queryDoH(cfg.EchDomain, dohURL, cfg.ServerIP)
+	// 不再传入 cfg.ServerIP 作为 Fallback IP，使用原始 queryDoH
+	return queryDoH(cfg.EchDomain, dohURL) 
 }
 
-// queryDoH 执行 DoH 查询（包含 DNS 故障时的 IP 拨号回退逻辑）
-func queryDoH(domain, dohURL string, serverFallbackIP string) (string, error) {
+// queryDoH 执行 DoH 查询 (已删除自定义 DialContext 逻辑)
+func queryDoH(domain, dohURL string) (string, error) {
 	u, err := url.Parse(dohURL)
 	if err != nil {
 		return "", fmt.Errorf("无效的 DoH URL: %v", err)
@@ -217,39 +214,13 @@ func queryDoH(domain, dohURL string, serverFallbackIP string) (string, error) {
 	req.Header.Set("Accept", "application/dns-message")
 	req.Header.Set("Content-Type", "application/dns-message")
 
-	// 为 HTTP 客户端添加自定义 DialContext 来绕过系统 DNS (修复 127.0.0.1:53 报错)
+	// FIX: 移除自定义 DialContext，依赖系统 DNS 解析
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			RootCAs: func() *x509.CertPool {
 				pool, _ := x509.SystemCertPool()
 				return pool
 			}(),
-		},
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dialer := &net.Dialer{Timeout: 10 * time.Second}
-			
-			// 1. 尝试使用系统 DNS 拨号
-			conn, err := dialer.DialContext(ctx, network, addr)
-			if err == nil {
-				return conn, nil // 成功
-			}
-
-			// 2. 如果失败，尝试使用硬编码 IP 绕过系统 DNS
-			dohHost, dohPort, splitErr := net.SplitHostPort(addr)
-			if splitErr != nil {
-				dohHost = addr
-				dohPort = "443"
-			}
-			
-			fallbackIP := serverFallbackIP 
-			if fallbackIP == "" {
-				fallbackIP = "1.1.1.1" 
-			}
-
-			log.Printf("[ECH Fetch DNS] 系统解析 %s 失败 (%v)。尝试使用 IP %s:%s 拨号...", dohHost, err, fallbackIP, dohPort)
-
-			// 尝试使用 Fallback IP 拨号
-			return dialer.DialContext(ctx, network, net.JoinHostPort(fallbackIP, dohPort))
 		},
 	}
 	
@@ -377,14 +348,12 @@ func parseHTTPSRecord(data []byte) string {
 
 // ======================== DoH 代理支持 (InstanceConfig 方法) ========================
 
-// queryDoHForProxy 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 	_, port, _, err := parseServerAddr(cfg.ServerAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	// 构建 DoH URL
 	dohURL := fmt.Sprintf("https://cloudflare-dns.com:%s/dns-query", port)
 
 	echBytes, err := cfg.getECHList()
@@ -397,22 +366,23 @@ func (cfg *InstanceConfig) queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 		return nil, fmt.Errorf("构建 TLS 配置失败: %w", err)
 	}
 
-	// 创建 HTTP 客户端
 	transport := &http.Transport{
 		TLSClientConfig: tlsCfg,
 	}
 
-	// 如果指定了 IP，使用自定义 Dialer
 	if cfg.ServerIP != "" {
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			_, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, err
 			}
-			dialer := &net.Dialer{
-				Timeout: 10 * time.Second,
+			ipHost := cfg.ServerIP
+			userHost, userPort, splitErr := net.SplitHostPort(cfg.ServerIP)
+			if splitErr == nil {
+				ipHost = userHost
+				port = userPort
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(cfg.ServerIP, port))
+			return net.DialTimeout(network, net.JoinHostPort(ipHost, port), 10*time.Second)
 		}
 	}
 
@@ -421,7 +391,6 @@ func (cfg *InstanceConfig) queryDoHForProxy(dnsQuery []byte) ([]byte, error) {
 		Timeout:   10 * time.Second,
 	}
 
-	// 发送 DoH 请求
 	req, err := http.NewRequest("POST", dohURL, bytes.NewReader(dnsQuery))
 	if err != nil {
 		return nil, err
@@ -467,7 +436,6 @@ func parseServerAddr(addr string) (host, port, path string, err error) {
 	return host, port, path, nil
 }
 
-// dialWebSocketWithECH 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) dialWebSocketWithECH(maxRetries int) (*websocket.Conn, error) {
 	host, port, path, err := parseServerAddr(cfg.ServerAddr)
 	if err != nil {
@@ -494,10 +462,11 @@ func (cfg *InstanceConfig) dialWebSocketWithECH(maxRetries int) (*websocket.Conn
 		dialer := websocket.Dialer{
 			TLSClientConfig: tlsCfg,
 			Subprotocols: func() []string {
+				// FIX: 如果 token 为空，返回 nil，避免传递空字符串子协议导致握手失败
 				if cfg.Token == "" {
 					return nil
 				}
-				return []string{cfg.Token} // 使用 cfg.Token
+				return []string{cfg.Token}
 			}(),
 			HandshakeTimeout: 10 * time.Second,
 		}
@@ -508,7 +477,6 @@ func (cfg *InstanceConfig) dialWebSocketWithECH(maxRetries int) (*websocket.Conn
 				if err != nil {
 					return nil, err
 				}
-				//支持优选(非标端口), IPv6 支持
 				ipHost := cfg.ServerIP
 				userHost, userPort, splitErr := net.SplitHostPort(cfg.ServerIP)
 				if splitErr == nil {
@@ -538,7 +506,6 @@ func (cfg *InstanceConfig) dialWebSocketWithECH(maxRetries int) (*websocket.Conn
 
 // ======================== 统一代理服务器 (InstanceConfig 方法) ========================
 
-// runProxyServer 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) runProxyServer() {
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -562,11 +529,10 @@ func (cfg *InstanceConfig) runProxyServer() {
 			continue
 		}
 
-		go cfg.handleConnection(conn) // 调用 cfg.handleConnection
+		go cfg.handleConnection(conn)
 	}
 }
 
-// handleConnection 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) handleConnection(conn net.Conn) {
 	if conn == nil {
 		return
@@ -580,7 +546,6 @@ func (cfg *InstanceConfig) handleConnection(conn net.Conn) {
 	clientAddr := conn.RemoteAddr().String()
 	conn.SetDeadline(time.Now().Add(30 * time.Second))
 
-	// 读取第一个字节判断协议
 	buf := make([]byte, 1)
 	n, err := conn.Read(buf)
 	if err != nil || n == 0 {
@@ -589,13 +554,10 @@ func (cfg *InstanceConfig) handleConnection(conn net.Conn) {
 
 	firstByte := buf[0]
 
-	// 使用 switch 判断协议类型
 	switch firstByte {
 	case 0x05:
-		// SOCKS5 协议
 		cfg.handleSOCKS5(conn, clientAddr, firstByte)
 	case 'C', 'G', 'P', 'H', 'D', 'O', 'T':
-		// HTTP 协议 (CONNECT, GET, POST, HEAD, DELETE, OPTIONS, TRACE, PUT, PATCH)
 		cfg.handleHTTP(conn, clientAddr, firstByte)
 	default:
 		log.Printf("[代理 / %s] %s 未知协议: 0x%02x", cfg.ListenAddr, clientAddr, firstByte)
@@ -604,19 +566,16 @@ func (cfg *InstanceConfig) handleConnection(conn net.Conn) {
 
 // ======================== SOCKS5 处理 (InstanceConfig 方法) ========================
 
-// handleSOCKS5 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) handleSOCKS5(conn net.Conn, clientAddr string, firstByte byte) {
 	if conn == nil {
 		return
 	}
 
-	// 验证版本
 	if firstByte != 0x05 {
 		log.Printf("[SOCKS5 / %s] %s 版本错误: 0x%02x", cfg.ListenAddr, clientAddr, firstByte)
 		return
 	}
 	
-	// 读取认证方法数量
 	buf := make([]byte, 1)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return
@@ -628,12 +587,10 @@ func (cfg *InstanceConfig) handleSOCKS5(conn net.Conn, clientAddr string, firstB
 		return
 	}
 
-	// 响应无需认证
 	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
 		return
 	}
 
-	// 读取请求
 	buf = make([]byte, 4)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return
@@ -678,7 +635,6 @@ func (cfg *InstanceConfig) handleSOCKS5(conn net.Conn, clientAddr string, firstB
 		return
 	}
 
-	// 读取端口
 	buf = make([]byte, 2)
 	if _, err := io.ReadFull(conn, buf); err != nil {
 		return
@@ -711,7 +667,6 @@ func (cfg *InstanceConfig) handleSOCKS5(conn net.Conn, clientAddr string, firstB
 	}
 }
 
-// handleUDPAssociate, handleUDPRelay, handleDNSQuery 保持为 InstanceConfig 的方法
 func (cfg *InstanceConfig) handleUDPAssociate(tcpConn net.Conn, clientAddr string) {
 	if tcpConn == nil {
 		return
@@ -756,7 +711,7 @@ func (cfg *InstanceConfig) handleUDPAssociate(tcpConn net.Conn, clientAddr strin
 	close(stopChan)
 	wg.Wait() 
 	udpConn.Close()
-	log.Printf("[UDP / %s] %s UDP ASSOCIATE 连接关闭", cfg.ListenAddr, clientAddr)
+	log.Printf("🛑 [UDP / %s] %s UDP ASSOCIATE 连接关闭", cfg.ListenAddr, clientAddr)
 }
 
 func (cfg *InstanceConfig) handleUDPRelay(udpConn *net.UDPConn, clientAddr string, stopChan chan struct{}, wg *sync.WaitGroup) {
@@ -856,7 +811,6 @@ func (cfg *InstanceConfig) handleDNSQuery(udpConn *net.UDPConn, clientAddr *net.
 
 // ======================== HTTP 处理 (InstanceConfig 方法) ========================
 
-// handleHTTP 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) handleHTTP(conn net.Conn, clientAddr string, firstByte byte) {
 	if conn == nil {
 		return
@@ -881,9 +835,8 @@ func (cfg *InstanceConfig) handleHTTP(conn net.Conn, clientAddr string, firstByt
 	requestURL := parts[1]
 	httpVersion := parts[2]
 
-	// 读取所有 headers
-	headers := make(map[string]string)
 	var headerLines []string
+	headers := make(map[string]string)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -956,7 +909,7 @@ func (cfg *InstanceConfig) handleHTTP(conn net.Conn, clientAddr string, firstByt
 		if contentLength := headers["content-length"]; contentLength != "" {
 			var length int
 			fmt.Sscanf(contentLength, "%d", &length)
-			if length > 0 && length < 10*1024*1024 { // 限制 10MB
+			if length > 0 && length < 10*1024*1024 {
 				body := make([]byte, length)
 				if _, err := io.ReadFull(reader, body); err == nil {
 					requestBuilder.Write(body)
@@ -980,19 +933,17 @@ func (cfg *InstanceConfig) handleHTTP(conn net.Conn, clientAddr string, firstByt
 
 // ======================== 通用隧道处理 (InstanceConfig 方法) ========================
 
-// 代理模式常量
 const (
-	modeSOCKS5      = 1 // SOCKS5 代理
-	modeHTTPConnect = 2 // HTTP CONNECT 隧道
-	modeHTTPProxy   = 3 // HTTP 普通代理（GET/POST等）
+	modeSOCKS5      = 1
+	modeHTTPConnect = 2
+	modeHTTPProxy   = 3
 )
 
-// handleTunnel 现在是 InstanceConfig 的方法
 func (cfg *InstanceConfig) handleTunnel(conn net.Conn, target, clientAddr string, mode int, firstFrame []byte) error {
 	if conn == nil {
 		return errors.New("连接对象为空")
 	}
-	wsConn, err := cfg.dialWebSocketWithECH(2) // 调用 cfg.dialWebSocketWithECH
+	wsConn, err := cfg.dialWebSocketWithECH(2)
 	if err != nil {
 		sendErrorResponse(conn, mode)
 		return err
@@ -1005,7 +956,6 @@ func (cfg *InstanceConfig) handleTunnel(conn net.Conn, target, clientAddr string
 
 	var mu sync.Mutex
 
-	// 保活
 	stopPing := make(chan bool)
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
@@ -1025,7 +975,6 @@ func (cfg *InstanceConfig) handleTunnel(conn net.Conn, target, clientAddr string
 
 	conn.SetDeadline(time.Time{})
 
-	// 读取第一帧数据（SOCKS5/无请求体 HTTP）
 	if firstFrame == nil && mode == modeSOCKS5 {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		buffer := make([]byte, 32*1024) 
@@ -1036,11 +985,10 @@ func (cfg *InstanceConfig) handleTunnel(conn net.Conn, target, clientAddr string
 		}
 	}
 
-	// 构建连接消息，包含代理 IP 信息
 	var connectMsg []byte
 	if cfg.ProxyIP != "" {
 		connectMsg = append([]byte(fmt.Sprintf("CONNECT:%s|", target)), firstFrame...)
-		connectMsg = append(connectMsg, []byte(fmt.Sprintf("|%s", cfg.ProxyIP))...) // 使用 cfg.ProxyIP
+		connectMsg = append(connectMsg, []byte(fmt.Sprintf("|%s", cfg.ProxyIP))...)
 	} else {
 		connectMsg = append([]byte(fmt.Sprintf("CONNECT:%s|", target)), firstFrame...)
 	}
@@ -1053,7 +1001,6 @@ func (cfg *InstanceConfig) handleTunnel(conn net.Conn, target, clientAddr string
 		return err
 	}
 
-	// 等待响应
 	_, msg, err := wsConn.ReadMessage()
 	if err != nil {
 		sendErrorResponse(conn, mode)
@@ -1070,14 +1017,12 @@ func (cfg *InstanceConfig) handleTunnel(conn net.Conn, target, clientAddr string
 		return fmt.Errorf("意外响应: %s", response)
 	}
 
-	// 发送成功响应（根据模式不同而不同）
 	if err := sendSuccessResponse(conn, mode); err != nil {
 		return err
 	}
 
 	log.Printf("🔗 [代理 / %s] %s 已连接: %s", cfg.ListenAddr, clientAddr, target)
 
-	// 双向转发
 	done := make(chan struct{})
 	var once sync.Once
 	closeDone := func() {
